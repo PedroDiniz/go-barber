@@ -1,13 +1,12 @@
 import * as Yup from 'yup';
 import { startOfHour, parseISO, isBefore, format, subHours } from 'date-fns';
-import pt from 'date-fns/locale/pt';
+import ptBR from 'date-fns/locale/pt-BR';
+import Appointment from '../models/Appointment';
 import User from '../models/User';
 import File from '../models/File';
-import Appointment from '../models/Appointment';
 import Notification from '../schemas/Notification';
-
-import CancellationMail from '../jobs/CancellationMail';
 import Queue from '../../lib/Queue';
+import CancellationMail from '../jobs/CancellationMail';
 
 class AppointmentController {
   async index(req, res) {
@@ -16,9 +15,9 @@ class AppointmentController {
     const appointments = await Appointment.findAll({
       where: { user_id: req.userId, canceled_at: null },
       order: ['date'],
+      attributes: ['id', 'date', 'past', 'cancelable'],
       limit: 20,
       offset: (page - 1) * 20,
-      attributes: ['id', 'date', 'past', 'cancelable'],
       include: [
         {
           model: User,
@@ -45,54 +44,35 @@ class AppointmentController {
     });
 
     if (!(await schema.isValid(req.body))) {
-      return res.status(400).json({ error: 'Validation fails' });
+      return res.status(400).json({ error: 'Validation failed' });
     }
 
     const { provider_id, date } = req.body;
+
     /**
      * Check if provider_id is a provider
      */
-
     const checkIsProvider = await User.findOne({
-      where: {
-        id: provider_id,
-        provider: true,
-      },
+      where: { id: provider_id, provider: true },
     });
 
     if (!checkIsProvider) {
       return res
         .status(401)
-        .json({ error: 'You can onl create appointments with providers' });
+        .json({ error: 'You can only create appointments with providers' });
     }
 
-    /**
-     * Block provider from schedule whit himself
-     */
-
-    const checkIsDuplicated = await User.findOne({
-      where: {
-        id: provider_id,
-      },
-    });
-
-    if (checkIsDuplicated.id === req.userId) {
+    if (provider_id === req.userId) {
       return res
-        .status(401)
-        .json({ error: 'You cannot create an appointment with yourself' });
+        .status(400)
+        .json({ error: "You can't create appointments with yourself" });
     }
-
-    // check for past dates
 
     const hourStart = startOfHour(parseISO(date));
 
     if (isBefore(hourStart, new Date())) {
-      return res
-        .status(400)
-        .json({ error: 'Appointment date is not available' });
+      return res.status(400).json({ error: 'Past dates are not permitted' });
     }
-
-    // check date availability
 
     const checkAvailability = await Appointment.findOne({
       where: {
@@ -103,28 +83,29 @@ class AppointmentController {
     });
 
     if (checkAvailability) {
-      return res.status(400).json({ error: 'Past dates are not allowed' });
+      return res
+        .status(400)
+        .json({ error: 'Appointment date is not available' });
     }
 
     const appointment = await Appointment.create({
       user_id: req.userId,
       provider_id,
-      date,
+      date: hourStart,
     });
 
     /**
-     * Notify provider
+     * Notify appointment provider
      */
-
     const user = await User.findByPk(req.userId);
     const formattedDate = format(
       hourStart,
-      "'dia' dd 'de' MMMM',' 'às' H:mm'h'",
-      { locale: pt }
+      "'dia' dd 'de' MMMM', às' H:mm'h'",
+      { locale: ptBR }
     );
 
     await Notification.create({
-      content: `Novo agendamento de ${user.name} para o ${formattedDate}`,
+      content: `Novo agendamento de ${user.name} para ${formattedDate}`,
       user: provider_id,
     });
 
@@ -142,36 +123,22 @@ class AppointmentController {
         {
           model: User,
           as: 'user',
+          attributes: ['name'],
         },
       ],
     });
 
-    // check if this appointment exists
-
-    if (appointment == null) {
-      return res.status(401).json({
-        error: 'This appointment do not exists',
-      });
-    }
-
-    // check if user has permission to delete appointment
-
     if (appointment.user_id !== req.userId) {
       return res.status(401).json({
-        error: "you don't have permission to cancel this appointment.",
+        error: "You don't have permission to cancel this appointment",
       });
     }
-
-    // 13:00
-    // dateWithSub: 11h
-
-    // cancel time
 
     const dateWithSub = subHours(appointment.date, 2);
 
     if (isBefore(dateWithSub, new Date())) {
       return res.status(401).json({
-        error: 'You can only cancel appointments 2 hours in advance.',
+        error: 'You can only cancel appointments 2 hours in advance',
       });
     }
 
